@@ -247,6 +247,11 @@ class WeightedGroupL2(BasePenalty):
 
     Where :math:`i_{w_{[g]} \geq 0}` is the indicator function of the positive orthant.
 
+    When a prior vector :math:`b` is provided, the penalty is shifted:
+
+    .. math::
+        sum_{g=1}^{n_"groups"} "weights"_g xx ||w_{[g]} - b_{[g]}||
+
     Refer to :ref:`prox_nn_group_lasso` for details on the derivation of the proximal
     operator and the distance to subdifferential.
 
@@ -268,12 +273,34 @@ class WeightedGroupL2(BasePenalty):
 
     positive : bool, optional
         When set to ``True``, forces the coefficient vector to be positive.
+
+    prior : array, shape (n_features,)
+        Optional shift of the penalization center. Defaults to zeros, which
+        corresponds to the vanilla group lasso penalty.
     """
 
-    def __init__(self, alpha, weights, grp_ptr, grp_indices, positive=False):
+    def __init__(self, alpha, weights, grp_ptr, grp_indices, positive=False, prior=None):
         self.alpha, self.weights = alpha, weights
         self.grp_ptr, self.grp_indices = grp_ptr, grp_indices
         self.positive = positive
+
+        n_features = len(self.grp_indices)
+        if prior is None:
+            prior = np.zeros(n_features, dtype=np.float64)
+        else:
+            prior = np.asarray(prior, dtype=np.float64)
+            if prior.ndim != 1:
+                prior = prior.ravel()
+            if len(prior) != n_features:
+                raise ValueError(
+                    "The size of the prior vector should be n_features, "
+                    f"expected {n_features}, got {len(prior)}.")
+
+        if self.positive and np.any(prior):
+            raise ValueError(
+                "Using a non-zero prior with positive=True is not supported.")
+
+        self.prior = np.ascontiguousarray(prior)
 
     def get_spec(self):
         spec = (
@@ -281,6 +308,7 @@ class WeightedGroupL2(BasePenalty):
             ('weights', float64[:]),
             ('grp_ptr', int32[:]),
             ('grp_indices', int32[:]),
+            ('prior', float64[:]),
             ('positive', bool_),
         )
         return spec
@@ -288,20 +316,21 @@ class WeightedGroupL2(BasePenalty):
     def params_to_dict(self):
         return dict(alpha=self.alpha, weights=self.weights,
                     grp_ptr=self.grp_ptr, grp_indices=self.grp_indices,
-                    positive=self.positive)
+                    prior=self.prior, positive=self.positive)
 
     def value(self, w):
         """Value of penalty at vector ``w``."""
         if self.positive and np.any(w < 0):
             return np.inf
         alpha, weights = self.alpha, self.weights
+        prior = self.prior
         grp_ptr, grp_indices = self.grp_ptr, self.grp_indices
         n_grp = len(grp_ptr) - 1
 
         sum_weighted_L2 = 0.
         for g in range(n_grp):
             grp_g_indices = grp_indices[grp_ptr[g]: grp_ptr[g+1]]
-            w_g = w[grp_g_indices]
+            w_g = w[grp_g_indices] - prior[grp_g_indices]
 
             sum_weighted_L2 += alpha * weights[g] * norm(w_g)
 
@@ -309,8 +338,14 @@ class WeightedGroupL2(BasePenalty):
 
     def prox_1group(self, value, stepsize, g):
         """Compute the proximal operator of group ``g``."""
-        return BST(
-            value, self.alpha * stepsize * self.weights[g], positive=self.positive)
+        grp_ptr, grp_indices = self.grp_ptr, self.grp_indices
+        grp_g_indices = grp_indices[grp_ptr[g]: grp_ptr[g+1]]
+        prior_g = self.prior[grp_g_indices]
+        shifted_val = value - prior_g
+        prox_shifted = BST(
+            shifted_val, self.alpha * stepsize * self.weights[g],
+            positive=self.positive)
+        return prior_g + prox_shifted
 
     def subdiff_distance(self, w, grad_ws, ws):
         """Compute distance to the subdifferential at ``w`` of negative gradient.
@@ -323,6 +358,7 @@ class WeightedGroupL2(BasePenalty):
         """
         alpha, weights = self.alpha, self.weights
         grp_ptr, grp_indices = self.grp_ptr, self.grp_indices
+        prior = self.prior
 
         scores = np.zeros(len(ws))
         grad_ptr = 0
@@ -332,7 +368,8 @@ class WeightedGroupL2(BasePenalty):
             grad_g = grad_ws[grad_ptr: grad_ptr + len(grp_g_indices)]
             grad_ptr += len(grp_g_indices)
 
-            w_g = w[grp_g_indices]
+            w_g_full = w[grp_g_indices]
+            w_g = w_g_full - prior[grp_g_indices]
             norm_w_g = norm(w_g)
 
             if self.positive:
@@ -341,13 +378,13 @@ class WeightedGroupL2(BasePenalty):
                     neg_grad_g = grad_g[grad_g < 0.]
                     scores[idx] = max(0,
                                       norm(neg_grad_g) - self.alpha * weights[g])
-                elif np.any(w_g < 0):
+                elif np.any(w_g_full < 0):
                     scores[idx] = np.inf
                 else:
                     res = np.zeros_like(grad_g)
                     for j in range(len(w_g)):
                         thresh = alpha * weights[g] * w_g[j] / norm_w_g
-                        if w_g[j] > 0:
+                        if w_g_full[j] > 0:
                             res[j] = -grad_g[j] - thresh
                         else:
                             # thresh is 0, we simplify the expression
@@ -368,6 +405,7 @@ class WeightedGroupL2(BasePenalty):
 
     def generalized_support(self, w):
         grp_indices, grp_ptr = self.grp_indices, self.grp_ptr
+        prior = self.prior
         n_groups = len(grp_ptr) - 1
         is_penalized = self.is_penalized(n_groups)
 
@@ -378,7 +416,7 @@ class WeightedGroupL2(BasePenalty):
                 continue
 
             grp_g_indices = grp_indices[grp_ptr[g]: grp_ptr[g+1]]
-            if np.any(w[grp_g_indices]):
+            if np.any(w[grp_g_indices] - prior[grp_g_indices]):
                 gsupp[g] = True
 
         return gsupp

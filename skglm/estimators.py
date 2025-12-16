@@ -1576,9 +1576,10 @@ class GroupLasso(RegressorMixin, LinearModel):
 
     .. math::
         1 / (2 xx n_"samples") ||y - X w||_2 ^ 2 + alpha \sum_g
-        weights_g ||w_{[g]}||_2
+        weights_g ||w_{[g]} - b_{[g]}||_2
 
-    with :math:`w_{[g]}` the coefficients of the g-th group.
+    with :math:`w_{[g]}` the coefficients of the g-th group and :math:`b_{[g]}`
+    an optional prior (defaults to zeros, recovering the vanilla group lasso).
 
     Parameters
     ----------
@@ -1597,6 +1598,11 @@ class GroupLasso(RegressorMixin, LinearModel):
     weights : array, shape (n_groups,), optional (default=None)
         Positive weights used in the L1 penalty part of the Lasso
         objective. If ``None``, weights equal to 1 are used.
+
+    prior : array-like of shape (n_features,), optional
+        Prior/target coefficient vector. The group penalty is applied to
+        ``w - prior`` instead of ``w``. Intercept (when fitted) is not part
+        of ``prior``.
 
     max_iter : int, optional (default=50)
         The maximum number of iterations (subproblem definitions).
@@ -1644,11 +1650,12 @@ class GroupLasso(RegressorMixin, LinearModel):
 
     def __init__(self, groups, alpha=1., weights=None, max_iter=50, max_epochs=50_000,
                  p0=10, verbose=0, tol=1e-4, positive=False, fit_intercept=True,
-                 warm_start=False, ws_strategy="subdiff"):
+                 warm_start=False, ws_strategy="subdiff", prior=None):
         super().__init__()
         self.alpha = alpha
         self.groups = groups
         self.weights = weights
+        self.prior = prior
         self.tol = tol
         self.max_iter = max_iter
         self.max_epochs = max_epochs
@@ -1687,7 +1694,7 @@ class GroupLasso(RegressorMixin, LinearModel):
         weights = np.ones(len(group_sizes)) if self.weights is None else self.weights
         group_penalty = WeightedGroupL2(alpha=self.alpha, grp_ptr=grp_ptr,
                                         grp_indices=grp_indices, weights=weights,
-                                        positive=self.positive)
+                                        positive=self.positive, prior=self.prior)
         quad_group = QuadraticGroup(grp_ptr=grp_ptr, grp_indices=grp_indices)
         solver = GroupBCD(
             self.max_iter, self.max_epochs, self.p0, tol=self.tol,
